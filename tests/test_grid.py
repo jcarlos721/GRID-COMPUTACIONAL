@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import socket
+import tempfile
 import threading
 import unittest
 
@@ -229,6 +232,77 @@ class TestGridIntegration(unittest.TestCase):
         )
         with self.assertRaises(OSError):
             worker.run()
+
+    def test_master_saves_run_insights_to_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            master = MasterNode(
+                host="127.0.0.1",
+                port=0,
+                total_n=100,
+                chunk_size=50,
+                lease_timeout_sec=5.0,
+                output_dir=tmpdir,
+                verbose=False,
+            )
+            master_thread = threading.Thread(target=master.start, daemon=True)
+            master_thread.start()
+            self.assertTrue(master.wait_ready(timeout=5.0))
+
+            try:
+                worker = WorkerNode(
+                    worker_id="w-insight",
+                    master_host="127.0.0.1",
+                    master_port=master.port,
+                    verbose=False,
+                )
+                worker.run()
+                self.assertTrue(master.wait_until_finished(timeout=5.0))
+
+                files = list(Path(tmpdir).glob("insights_*.json"))
+                self.assertEqual(len(files), 1)
+                data = json.loads(files[0].read_text(encoding="utf-8"))
+                self.assertEqual(set(data.keys()), {"elapsed_sec", "tasks_by_worker"})
+                self.assertIsInstance(data["elapsed_sec"], float)
+                self.assertGreaterEqual(data["elapsed_sec"], 0.0)
+                self.assertEqual(data["tasks_by_worker"], {"w-insight": 2})
+            finally:
+                master.stop()
+                master_thread.join(timeout=3.0)
+
+    def test_master_elapsed_excludes_idle_wait_before_first_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            master = MasterNode(
+                host="127.0.0.1",
+                port=0,
+                total_n=100,
+                chunk_size=50,
+                lease_timeout_sec=5.0,
+                output_dir=tmpdir,
+                verbose=False,
+            )
+            master_thread = threading.Thread(target=master.start, daemon=True)
+            master_thread.start()
+            self.assertTrue(master.wait_ready(timeout=5.0))
+
+            try:
+                # Simula espera ociosa antes de qualquer worker conectar
+                threading.Event().wait(0.3)
+                worker = WorkerNode(
+                    worker_id="w-delayed",
+                    master_host="127.0.0.1",
+                    master_port=master.port,
+                    verbose=False,
+                )
+                worker.run()
+                self.assertTrue(master.wait_until_finished(timeout=5.0))
+
+                files = list(Path(tmpdir).glob("insights_*.json"))
+                self.assertEqual(len(files), 1)
+                data = json.loads(files[0].read_text(encoding="utf-8"))
+                self.assertLess(data["elapsed_sec"], 0.25)
+            finally:
+                master.stop()
+                master_thread.join(timeout=3.0)
 
 
 if __name__ == "__main__":

@@ -8,10 +8,12 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 - `src/sieve.py`: Geração de primos base até `isqrt(N)` (`generate_base_primes`) e crivo segmentado em `[start, end]` (`sum_primes_in_range`).
 - `src/task_manager.py`: Máquina de estados thread-safe (`PENDING`, `IN_PROGRESS`, `COMPLETED`) protegida por `threading.Lock`, com controle de *lease* em relógio monotônico (`time.monotonic()`), isolamento por `session_id`, `attempt_id`, métricas (`reassignments`, `stale_rejects`, `completed_by_worker`) e proteção contra resultados obsoletos.
 - `src/sequential_baseline.py`: Execução sequencial de referência com medição de tempo (`time.perf_counter()`).
-- `src/master.py`: Nó coordenador TCP multithread que exige `REGISTER` antes de `GET_TASK`, mantém monitor periódico de *lease* (`_reaper_loop`) e exibe o resumo final de métricas.
+- `src/master.py`: Nó coordenador TCP multithread que exige `REGISTER` antes de `GET_TASK`, mantém monitor periódico de *lease* (`_reaper_loop`), exibe o resumo final de métricas e salva os insights em `outputs/`.
 - `src/worker.py`: Nó trabalhador TCP em modelo *pull* com reconexão automática caso o Master ainda não esteja disponível, *heartbeat* periódico, timeout periódico no `recv` (`1.0s`) para parada limpa e flags de simulação de falhas.
+- `src/insights.py`: Persistência dos insights de execução em JSON (`outputs/insights_<timestamp>.json`) com o tempo total para finalizar o intervalo (`elapsed_sec`) e a quantidade de tasks concluídas por cada worker (`tasks_by_worker`).
+- `outputs/`: Diretório padrão onde o Master grava os arquivos JSON de insights ao finalizar cada execução.
 - `tests/test_core.py`: Testes unitários isolados de protocolo, crivo segmentado, baseline e máquina de estados.
-- `tests/test_grid.py`: Testes de integração TCP entre Master e Workers (incluindo `GET_TASK` sem `REGISTER`, `worker_id` duplicado, timeout no `recv` e retentativa de conexão ao Master).
+- `tests/test_grid.py`: Testes de integração TCP entre Master e Workers (incluindo `GET_TASK` sem `REGISTER`, `worker_id` duplicado, timeout no `recv`, retentativa de conexão ao Master e geração de insights em `outputs/`).
 - `tests/fault_simulation.py`: Simulação reproduzível de queda abrupta de worker e atraso com expiração de *lease* (`STALE_ATTEMPT`).
 
 ## Parâmetros CLI
@@ -22,6 +24,7 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 - `--n`: Limite superior `N` (padrão: `1000000`)
 - `--chunk-size`: Tamanho de cada subintervalo `[start, end]` (padrão: `50000`)
 - `--lease-timeout`: Tempo máximo de *lease* em segundos (padrão: `10.0`)
+- `--output-dir`: Diretório onde os arquivos de insights serão salvos (padrão: `outputs`)
 
 ### Worker (`python3 -m src.worker`)
 - `--master-host`: Endereço IP/host do Master (padrão: `127.0.0.1`)
@@ -35,6 +38,18 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 
 ### Comportamento do `HEARTBEAT`
 Durante o processamento de cada bloco `[start, end]`, o worker mantém uma thread auxiliar que envia `HEARTBEAT` (`worker_id`, `task_id`, `attempt_id`) no intervalo configurado. No Master, `TaskManager.renew_lease` verifica sob `Lock` se a tarefa ainda está `IN_PROGRESS` para o mesmo `worker_id` e `attempt_id` antes do vencimento e **renova efetivamente o prazo** (`deadline_ts = time.monotonic() + lease_timeout_sec`).
+
+### Insights de Execução (`outputs/`)
+Ao concluir todas as tarefas, o Master gera automaticamente um arquivo JSON em `outputs/insights_<timestamp>.json` contendo:
+```json
+{
+  "elapsed_sec": 1.234,
+  "tasks_by_worker": {
+    "pc-master-local": 25,
+    "pc-amigo": 25
+  }
+}
+```
 
 ## Execução Local (Mesma Máquina)
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import math
+from pathlib import Path
 import socket
 import threading
 import time
 import uuid
 from typing import Any
 
+from src.insights import save_run_insights
 from src.protocol import (
     LineBuffer,
     MessageType,
@@ -30,6 +32,7 @@ class MasterNode:
         total_n: int = 1_000_000,
         chunk_size: int = 50_000,
         lease_timeout_sec: float = 10.0,
+        output_dir: str | Path | None = None,
         verbose: bool = True,
     ) -> None:
         self.host = host
@@ -37,6 +40,7 @@ class MasterNode:
         self.total_n = total_n
         self.chunk_size = chunk_size
         self.lease_timeout_sec = lease_timeout_sec
+        self.output_dir = output_dir
         self.verbose = verbose
 
         self.base_primes = generate_base_primes(math.isqrt(max(0, total_n)))
@@ -102,6 +106,9 @@ class MasterNode:
                 worker_id, session_id=session_id
             )
             if assignment is not None:
+                with self._state_lock:
+                    if self._start_ts is None:
+                        self._start_ts = time.perf_counter()
                 self._log(
                     f"Atribuída tarefa {assignment.task_id} (attempt={assignment.attempt_id}) "
                     f"[{assignment.start}, {assignment.end}] -> {worker_id}"
@@ -176,6 +183,13 @@ class MasterNode:
                         f"completed_by_worker={summary['completed_by_worker']} | "
                         f"final_sum={summary['total_sum']}"
                     )
+                    if self.output_dir is not None:
+                        insight_path = save_run_insights(
+                            output_dir=self.output_dir,
+                            elapsed_sec=elapsed_ms / 1000.0,
+                            tasks_by_worker=summary["completed_by_worker"],
+                        )
+                        self._log(f"Insights salvos em: {insight_path}")
                     self._finished_event.set()
             else:
                 reason = outcome.reason or "REJECTED"
@@ -243,7 +257,8 @@ class MasterNode:
 
     def start(self) -> None:
         """Inicia o servidor TCP do Master e aceita conexões até `stop()`."""
-        self._start_ts = time.perf_counter()
+        with self._state_lock:
+            self._start_ts = None
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((self.host, self.port))
@@ -327,6 +342,11 @@ def main() -> None:
         default=10.0,
         help="Timeout de lease em segundos",
     )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="Diretório onde os arquivos de insights serão salvos",
+    )
     args = parser.parse_args()
 
     master = MasterNode(
@@ -335,6 +355,7 @@ def main() -> None:
         total_n=args.n,
         chunk_size=args.chunk_size,
         lease_timeout_sec=args.lease_timeout,
+        output_dir=args.output_dir or None,
     )
 
     server_thread = threading.Thread(target=master.start, daemon=True)
