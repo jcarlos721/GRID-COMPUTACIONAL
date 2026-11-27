@@ -53,8 +53,6 @@ _REQUIRED_FIELDS: dict[MessageType, dict[str, tuple[type, ...]]] = {
         "worker_id": (str,),
         "task_id": (int,),
         "attempt_id": (int,),
-        "partial_sum": (int,),
-        "primes_count": (int,),
         "elapsed_ms": (int, float),
     },
     MessageType.NO_TASK: {},
@@ -108,10 +106,20 @@ def validate_message(message: dict[str, Any]) -> dict[str, Any]:
         if not all(_is_valid_type(p, (int,)) for p in message["base_primes"]):
             raise ProtocolError("'base_primes' deve conter apenas inteiros.")
     elif msg_type == MessageType.SUBMIT_RESULT:
-        if message["partial_sum"] < 0:
-            raise ProtocolError("'partial_sum' não pode ser negativo.")
-        if message["primes_count"] < 0:
-            raise ProtocolError("'primes_count' não pode ser negativo.")
+        if "sobel_pixels" in message:
+            if not isinstance(message["sobel_pixels"], list):
+                raise ProtocolError("'sobel_pixels' deve ser uma lista.")
+            for field in ("row_start", "row_end"):
+                if not _is_valid_type(message.get(field), (int,)):
+                    raise ProtocolError(f"'{field}' deve ser inteiro no resultado Sobel.")
+        else:
+            for field in ("partial_sum", "primes_count"):
+                if not _is_valid_type(message.get(field), (int,)):
+                    raise ProtocolError(f"Campo obrigatório '{field}' ausente ou inválido.")
+            if message["partial_sum"] < 0:
+                raise ProtocolError("'partial_sum' não pode ser negativo.")
+            if message["primes_count"] < 0:
+                raise ProtocolError("'primes_count' não pode ser negativo.")
     elif msg_type == MessageType.ACK and message["accepted"] is not True:
         raise ProtocolError("Mensagem ACK deve ter 'accepted=True'.")
     elif msg_type == MessageType.REJECT and message["accepted"] is not False:

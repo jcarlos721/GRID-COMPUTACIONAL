@@ -22,14 +22,59 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 - `--n`: Limite superior `N` (padrão: `1000000`)
 - `--chunk-size`: Tamanho de cada subintervalo `[start, end]` (padrão: `50000`)
 - `--lease-timeout`: Tempo máximo de *lease* em segundos (padrão: `10.0`)
+- `--chunks-dir`: Diretório de `chunk_*.json`; ativa a distribuição de pacotes de pixels
 
 ### Worker (`python3 -m src.worker`)
 - `--master-host`: Endereço IP/host do Master (padrão: `127.0.0.1`)
 - `--master-port`: Porta TCP do Master (padrão: `5000`)
 - `--worker-id`: Identificador do Worker (padrão: `worker-<pid>-<6hex>`)
+- `--backend`: Backend de cálculo: `cpu` ou `cuda` (padrão: `cpu`)
 - `--heartbeat-interval`: Intervalo de *heartbeat* em segundos (padrão: `max(0.2, lease_timeout / 3.0)`)
 - `--artificial-delay`: Atraso artificial em segundos antes de enviar `SUBMIT_RESULT`, após encerrar os *heartbeats* da tarefa (simula nó lento)
 - `--fail-after-tasks`: Encerra o worker abruptamente após concluir `N` tarefas (simula queda)
+
+## Backend CUDA — Fases 2 a 5
+
+Os kernels estão em `src/sieve_cuda.py`. Cada thread de inicialização trata uma posição: `i = cuda.grid(1)`, que representa o número `start + i`. As flags usam `int32`: `1` significa candidato a primo e `0` significa composto. Esse tipo permite limpar a flag com `cuda.atomic.and_` quando threads diferentes encontram o mesmo múltiplo.
+
+Na marcação, cada bloco recebe um primo-base e suas threads dividem os múltiplos em paralelo. O primeiro múltiplo é `max(p * p, ceil(start / p) * p)`, mantendo o próprio primo no segmento. Primos-base menores que 2 ou cujo quadrado passa de `end` são ignorados.
+
+Na redução, cada bloco calcula uma soma e uma contagem parciais usando memória compartilhada. Um segundo kernel combina os parciais e `reduce_segment` copia os dois valores finais para o Python como `(soma, quantidade)`. A soma e a contagem usam inteiros de 64 bits.
+
+Com uma GPU CUDA disponível, inicialização, marcação e redução podem ser conferidas assim:
+
+```python
+from src.sieve_cuda import initialize_segment, mark_composites, reduce_segment
+
+start, flags = initialize_segment(10, 30)
+mark_composites(start, 30, flags, [2, 3, 5, 7])
+candidates = [start + i for i, flag in enumerate(flags.copy_to_host()) if flag]
+print(candidates)
+# [11, 13, 17, 19, 23, 29]
+print(reduce_segment(start, 30, flags))
+# (112, 6)
+```
+
+O Worker usa CPU por padrão. Para selecionar CUDA, execute-o com `--backend cuda`. A troca acontece somente no cálculo; `REGISTER`, `GET_TASK`, `HEARTBEAT` e `SUBMIT_RESULT` continuam no mesmo fluxo TCP. O Worker mantém os heartbeats durante o cálculo e só envia `SUBMIT_RESULT` depois que a redução CUDA sincroniza e devolve a soma e a contagem.
+
+```bash
+python3 -m src.worker --master-host 127.0.0.1 --master-port 5056 --worker-id worker-gpu --backend cuda
+```
+
+O backend CUDA requer Numba-CUDA e uma GPU CUDA disponível. Sem o argumento `--backend cuda`, o Worker não importa o módulo CUDA.
+
+### Distribuição de chunks Sobel pelo Master
+
+Depois de criar os arquivos de chunk, o Master pode distribuí-los com `--chunks-dir`:
+
+```bash
+python -m src.sobel_chunks src/result/landsat_nir.json --output-dir src/result/chunks
+python -m src.master --host 0.0.0.0 --port 5056 --chunks-dir src/result/chunks
+```
+
+Cada `TASK_ASSIGN` inclui os pixels do chunk, dimensões, canais, `chunk_id` e limites das linhas. No modo de imagem, `SUBMIT_RESULT` recebe `row_start`, `row_end` e `sobel_pixels`; quando todos os chunks chegam, o Master junta as linhas e grava `sobel_output.json` em `src/result/` (ou no caminho passado por `--sobel-output`).
+
+O cliente `src/sobel_tcp_demo.cpp` demonstra a submissão desse formato com pixels zero. Ele testa o protocolo, mas ainda não executa o kernel Sobel.
 
 ### Comportamento do `HEARTBEAT`
 Durante o processamento de cada bloco `[start, end]`, o worker mantém uma thread auxiliar que envia `HEARTBEAT` (`worker_id`, `task_id`, `attempt_id`) no intervalo configurado. No Master, `TaskManager.renew_lease` verifica sob `Lock` se a tarefa ainda está `IN_PROGRESS` para o mesmo `worker_id` e `attempt_id` antes do vencimento e **renova efetivamente o prazo** (`deadline_ts = time.monotonic() + lease_timeout_sec`).
