@@ -9,9 +9,9 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 - `src/task_manager.py`: Máquina de estados thread-safe (`PENDING`, `IN_PROGRESS`, `COMPLETED`) protegida por `threading.Lock`, com controle de *lease* em relógio monotônico (`time.monotonic()`), isolamento por `session_id`, `attempt_id`, métricas (`reassignments`, `stale_rejects`, `completed_by_worker`) e proteção contra resultados obsoletos.
 - `src/sequential_baseline.py`: Execução sequencial de referência com medição de tempo (`time.perf_counter()`).
 - `src/master.py`: Nó coordenador TCP multithread que exige `REGISTER` antes de `GET_TASK`, mantém monitor periódico de *lease* (`_reaper_loop`) e exibe o resumo final de métricas.
-- `src/worker.py`: Nó trabalhador TCP em modelo *pull* com *heartbeat* periódico, timeout periódico no `recv` (`1.0s`) para parada limpa e flags de simulação de falhas.
+- `src/worker.py`: Nó trabalhador TCP em modelo *pull* com reconexão automática caso o Master ainda não esteja disponível, *heartbeat* periódico, timeout periódico no `recv` (`1.0s`) para parada limpa e flags de simulação de falhas.
 - `tests/test_core.py`: Testes unitários isolados de protocolo, crivo segmentado, baseline e máquina de estados.
-- `tests/test_grid.py`: Testes de integração TCP entre Master e Workers (incluindo `GET_TASK` sem `REGISTER`, `worker_id` duplicado e timeout no `recv`).
+- `tests/test_grid.py`: Testes de integração TCP entre Master e Workers (incluindo `GET_TASK` sem `REGISTER`, `worker_id` duplicado, timeout no `recv` e retentativa de conexão ao Master).
 - `tests/fault_simulation.py`: Simulação reproduzível de queda abrupta de worker e atraso com expiração de *lease* (`STALE_ATTEMPT`).
 
 ## Parâmetros CLI
@@ -28,6 +28,8 @@ Grid Computacional em Python 3.10+ (apenas biblioteca padrão) para calcular a s
 - `--master-port`: Porta TCP do Master (padrão: `5000`)
 - `--worker-id`: Identificador do Worker (padrão: `worker-<pid>-<6hex>`)
 - `--heartbeat-interval`: Intervalo de *heartbeat* em segundos (padrão: `max(0.2, lease_timeout / 3.0)`)
+- `--connect-retries`: Número máximo de tentativas de conexão ao Master (padrão: `None`, aguarda indefinidamente até o Master ficar disponível)
+- `--connect-retry-interval`: Intervalo em segundos entre tentativas de conexão ao Master (padrão: `2.0`)
 - `--artificial-delay`: Atraso artificial em segundos antes de enviar `SUBMIT_RESULT`, após encerrar os *heartbeats* da tarefa (simula nó lento)
 - `--fail-after-tasks`: Encerra o worker abruptamente após concluir `N` tarefas (simula queda)
 
@@ -92,6 +94,28 @@ python3 -m src.worker --master-host 192.168.0.134 --master-port 5000 --worker-id
 python3 -m src.sequential_baseline 100000000
 ```
 *(Certifique-se de que a porta TCP `5000` esteja liberada no firewall da máquina do Master.)*
+
+## Tabela Rápida de Comandos
+
+Execute os comandos a partir da raiz do projeto (`GRID-COMPUTACIONAL/`). Nos exemplos em rede, substitua `<IP_MASTER>` pelo IP retornado por `hostname -I` na máquina do Master (ex.: `192.168.0.134`).
+
+| Cenário | Onde rodar | Comando |
+| --- | --- | --- |
+| **Auxiliar: Descobrir IP** | Máquina Master | `hostname -I` |
+| **Auxiliar: Liberar porta** | Máquina Master | `sudo ufw allow 5000/tcp` |
+| **1. Master e Worker local** | Terminal 1 (Master) | `python3 -m src.master --host 127.0.0.1 --port 5000 --n 10000000 --chunk-size 500000 --lease-timeout 10` |
+| **1. Master e Worker local** | Terminal 2 (Worker) | `python3 -m src.worker --master-host 127.0.0.1 --master-port 5000 --worker-id pc-master-local` |
+| **2A. Rede: Master + Amigo Worker** | Seu PC (Master) | `python3 -m src.master --host 0.0.0.0 --port 5000 --n 100000000 --chunk-size 2000000 --lease-timeout 15` |
+| **2A. Rede: Master + Amigo Worker** | PC do amigo (Worker) | `python3 -m src.worker --master-host <IP_MASTER> --master-port 5000 --worker-id pc-amigo` |
+| **2B. Rede: Master + Worker local + Amigo** | Seu PC — Term. 1 (Master) | `python3 -m src.master --host 0.0.0.0 --port 5000 --n 100000000 --chunk-size 2000000 --lease-timeout 15` |
+| **2B. Rede: Master + Worker local + Amigo** | Seu PC — Term. 2 (Worker) | `python3 -m src.worker --master-host 127.0.0.1 --master-port 5000 --worker-id pc-master-local` |
+| **2B. Rede: Master + Worker local + Amigo** | PC do amigo (Worker) | `python3 -m src.worker --master-host <IP_MASTER> --master-port 5000 --worker-id pc-amigo` |
+| **3. Queda do seu Worker (amigo continua)** | Seu PC — Term. 1 (Master) | `python3 -m src.master --host 0.0.0.0 --port 5000 --n 100000000 --chunk-size 2000000 --lease-timeout 15` |
+| **3. Queda do seu Worker (amigo continua)** | Seu PC — Term. 2 (Worker) | `python3 -m src.worker --master-host 127.0.0.1 --master-port 5000 --worker-id pc-master-local --fail-after-tasks 1` |
+| **3. Queda do seu Worker (amigo continua)** | PC do amigo (Worker) | `python3 -m src.worker --master-host <IP_MASTER> --master-port 5000 --worker-id pc-amigo` |
+| **Baseline sequencial** | Local | `python3 -m src.sequential_baseline 100000000` |
+| **Testes unitários e integração** | Local | `python3 -m unittest discover -s tests -v` |
+| **Simulação de falhas** | Local | `python3 -m tests.fault_simulation -v` |
 
 ## Cenários de Teste
 

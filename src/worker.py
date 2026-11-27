@@ -6,6 +6,7 @@ import argparse
 from collections import deque
 import os
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +31,8 @@ class WorkerNode:
         master_port: int = 5000,
         heartbeat_interval_sec: float | None = None,
         retry_interval_sec: float = 0.25,
+        connect_retry_interval_sec: float = 2.0,
+        connect_retries: int | None = None,
         artificial_delay_sec: float = 0.0,
         fail_after_tasks: int | None = None,
         verbose: bool = True,
@@ -39,6 +42,8 @@ class WorkerNode:
         self.master_port = master_port
         self.heartbeat_interval_sec = heartbeat_interval_sec
         self.retry_interval_sec = retry_interval_sec
+        self.connect_retry_interval_sec = connect_retry_interval_sec
+        self.connect_retries = connect_retries
         self.artificial_delay_sec = artificial_delay_sec
         self.fail_after_tasks = fail_after_tasks
         self.verbose = verbose
@@ -102,12 +107,36 @@ class WorkerNode:
         """Sinaliza parada limpa do Worker."""
         self._stop_event.set()
 
+    def _connect_to_master(self) -> socket.socket | None:
+        """Conecta ao Master com retentativas enquanto ele não estiver disponível."""
+        attempts = 0
+        while not self._stop_event.is_set():
+            try:
+                return socket.create_connection(
+                    (self.master_host, self.master_port), timeout=10.0
+                )
+            except OSError as exc:
+                if (
+                    self.connect_retries is not None
+                    and attempts >= self.connect_retries
+                ):
+                    raise exc
+                attempts += 1
+                self._log(
+                    f"Master em {self.master_host}:{self.master_port} indisponível "
+                    f"({exc}). Tentando novamente em {self.connect_retry_interval_sec:.1f}s..."
+                )
+                if self._stop_event.wait(self.connect_retry_interval_sec):
+                    return None
+        return None
+
     def run(self) -> None:
         """Executa o loop principal do Worker conectando ao Master via TCP."""
         buffer = LineBuffer()
-        with socket.create_connection(
-            (self.master_host, self.master_port), timeout=10.0
-        ) as sock:
+        sock = self._connect_to_master()
+        if sock is None:
+            return
+        with sock:
             sock.settimeout(1.0)
             self._send(sock, MessageType.REGISTER, worker_id=self.worker_id)
 
@@ -239,6 +268,18 @@ def main() -> None:
         default=None,
         help="Encerra o worker abruptamente após concluir N tarefas (simula queda)",
     )
+    parser.add_argument(
+        "--connect-retries",
+        type=int,
+        default=None,
+        help="Número máximo de tentativas de conexão ao Master (padrão: aguarda indefinidamente)",
+    )
+    parser.add_argument(
+        "--connect-retry-interval",
+        type=float,
+        default=2.0,
+        help="Intervalo em segundos entre tentativas de conexão ao Master",
+    )
     args = parser.parse_args()
 
     worker = WorkerNode(
@@ -246,6 +287,8 @@ def main() -> None:
         master_host=args.master_host,
         master_port=args.master_port,
         heartbeat_interval_sec=args.heartbeat_interval,
+        connect_retry_interval_sec=args.connect_retry_interval,
+        connect_retries=args.connect_retries,
         artificial_delay_sec=args.artificial_delay,
         fail_after_tasks=args.fail_after_tasks,
     )
@@ -253,6 +296,13 @@ def main() -> None:
         worker.run()
     except KeyboardInterrupt:
         worker.stop()
+    except OSError as exc:
+        print(
+            f"[WORKER:{worker.worker_id}] Não foi possível conectar ao Master em "
+            f"{worker.master_host}:{worker.master_port}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

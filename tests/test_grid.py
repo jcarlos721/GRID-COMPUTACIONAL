@@ -174,6 +174,62 @@ class TestGridIntegration(unittest.TestCase):
         self.assertIsNone(msg)
         self.assertTrue(worker._stop_event.is_set())
 
+    def test_worker_retries_connection_until_master_starts(self) -> None:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        worker = WorkerNode(
+            worker_id="w-retry",
+            master_host="127.0.0.1",
+            master_port=port,
+            connect_retry_interval_sec=0.05,
+            verbose=False,
+        )
+        wt = threading.Thread(target=worker.run, daemon=True)
+        wt.start()
+
+        threading.Event().wait(0.15)
+        master = MasterNode(
+            host="127.0.0.1",
+            port=port,
+            total_n=100,
+            chunk_size=50,
+            lease_timeout_sec=5.0,
+            verbose=False,
+        )
+        master_thread = threading.Thread(target=master.start, daemon=True)
+        master_thread.start()
+        self.assertTrue(master.wait_ready(timeout=5.0))
+
+        try:
+            self.assertTrue(master.wait_until_finished(timeout=5.0))
+            wt.join(timeout=5.0)
+            self.assertFalse(wt.is_alive())
+            self.assertEqual(worker.tasks_completed, 2)
+        finally:
+            worker.stop()
+            master.stop()
+            master_thread.join(timeout=3.0)
+
+    def test_worker_raises_when_connect_retries_exhausted(self) -> None:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        worker = WorkerNode(
+            worker_id="w-fail",
+            master_host="127.0.0.1",
+            master_port=port,
+            connect_retry_interval_sec=0.02,
+            connect_retries=1,
+            verbose=False,
+        )
+        with self.assertRaises(OSError):
+            worker.run()
+
 
 if __name__ == "__main__":
     unittest.main()
