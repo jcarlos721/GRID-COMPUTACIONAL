@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Testes e ferramentas
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Pacotes gerados
+build/
+dist/
+*.egg-info/
