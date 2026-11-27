@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Testes e ferramentas
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Pacotes gerados
+build/
+dist/
+*.egg-info/
+
+
+resilt/8
+reslt/landsat_nir.json
+
+landsat_nir.json
+
+# Dados locais e binários gerados
+src/result/
+sobel_worker
